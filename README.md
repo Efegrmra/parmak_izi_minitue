@@ -1,0 +1,1 @@
+# parmak_izi_minitue
