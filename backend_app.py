@@ -15,10 +15,44 @@ from dotenv import load_dotenv
 from backend_utils import (
     ensure_tools, save_upload_to_tmp, nfseg_segment,
     mindtct_extract, nfiq2_score, bozorth3_score,
-    create_all_minutiae_png_base64  # <-- DEĞİŞTİ (Yeni fonksiyonu import et)
+    create_all_minutiae_png_base64
 )
 
 load_dotenv()
+
+# <--- YENİ YÜZDELİK HESAPLAMA AYARLARI --->
+# Bu değerleri ayarlayarak yüzdelik hesabını kalibre edebilirsiniz.
+# MIN_MATCH_THRESHOLD: Bu skorun altı %0 kabul edilir. 
+# (Bozorth3 için 40 makul bir "eşleşme başladı" eşiğidir)
+MIN_MATCH_THRESHOLD = 40.0
+
+# MAX_SATURATION_SCORE: Bu skor ve üzeri %100 kabul edilir.
+# (472'nin yüksek bir yüzde olması için 500 iyi bir tavan)
+MAX_SATURATION_SCORE = 500.0 
+
+def convert_bozorth_score_to_percentage(raw_score: int) -> float:
+    """Bozorth3 ham skorunu 0-100 arası bir yüzdeye çevirir."""
+    
+    if raw_score < MIN_MATCH_THRESHOLD:
+        # Eşiğin altındaysa, eşleşme %0'dır
+        return 0.0
+
+    if raw_score >= MAX_SATURATION_SCORE:
+        # Belirlediğimiz tavanın üzerindeyse, eşleşme %100'dür
+        return 100.0
+
+    # Puanı min-max aralığından 0-100 aralığına ölçeklendir
+    # Formül: (değer - min) / (max - min) * 100
+    try:
+        percentage = ((raw_score - MIN_MATCH_THRESHOLD) / (MAX_SATURATION_SCORE - MIN_MATCH_THRESHOLD)) * 100.0
+        # Sonucu bir ondalık basamağa yuvarla (örn: 93.9)
+        return round(percentage, 1)
+    except ZeroDivisionError:
+        # MIN ve MAX aynı ayarlanırsa bu olabilir, %100 döndür
+        return 100.0
+# <--- YENİ FONKSİYON SONU --->
+
+
 app = FastAPI(title="NBIS Fingerprint Backend", version="1.0.0")
 
 origins = (os.getenv("ALLOWED_ORIGINS") or "").split(",")
@@ -32,7 +66,7 @@ app.add_middleware(
 )
 
 class CompareResponse(BaseModel):
-    bozorth3_score: int
+    bozorth3_score: float  # <--- DEĞİŞTİ (int -> float)
     a_quality: dict | None = None
     b_quality: dict | None = None
     quality_summary: str | None = None
@@ -89,8 +123,10 @@ async def compare(
         a_xyt = mindtct_extract(a_proc, a_proc + "_mindtct")
         b_xyt = mindtct_extract(b_proc, b_proc + "_mindtct")
 
-        # Skoru hala hesaplıyoruz, ancak 'matched_pairs' listesini kullanmayacağız
-        score, _ = bozorth3_score(a_xyt, b_xyt)
+        # <--- DEĞİŞİKLİK: Ham skoru al ve yüzdeye çevir --->
+        raw_score, _ = bozorth3_score(a_xyt, b_xyt)
+        percentage_score = convert_bozorth_score_to_percentage(raw_score)
+        # <--- DEĞİŞİKLİK SONU --->
 
         a_q = nfiq2_score(a_proc) if include_quality else None
         b_q = nfiq2_score(b_proc) if include_quality else None
@@ -102,17 +138,12 @@ async def compare(
                 qs = f"avg NFIQ2 ≈ {av:.2f}"
         except Exception:
             pass
-
-        # --- DEĞİŞİKLİK: TÜM NOKTALARI ÇİZEN FONKSİYONU ÇAĞIR ---
-        # Artık 'matched_indices' listesine ihtiyacımız yok.
-        # Fonksiyon, .xyt yolunu kullanarak TÜM noktaları okuyacak ve çizecek.
         
         a_b64 = create_all_minutiae_png_base64(a_bytes, a_suffix, a_xyt)
         b_b64 = create_all_minutiae_png_base64(b_bytes, b_suffix, b_xyt)
-        # --- DEĞİŞİKLİK SONU ---
 
         return CompareResponse(
-            bozorth3_score=score,
+            bozorth3_score=percentage_score, # <--- DEĞİŞTİ (raw_score yerine yüzdelik skor)
             a_quality=a_q,
             b_quality=b_q,
             quality_summary=qs,
